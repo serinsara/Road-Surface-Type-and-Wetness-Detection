@@ -1,0 +1,105 @@
+#%%
+import tensorflow as tf
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+from tensorflow.keras.preprocessing import image_dataset_from_directory
+from tensorflow.keras.applications import MobileNetV3Small
+from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout
+from tensorflow.keras.models import Model
+from sklearn.metrics import accuracy_score, confusion_matrix, ConfusionMatrixDisplay, roc_curve, auc
+import collections
+import pandas as pd
+
+import os
+print("Files in 'models':", os.listdir('models'))
+
+
+
+#%%
+
+trained_model = tf.keras.models.load_model('models/best_model.keras')
+
+#%%
+IMG_SIZE = 224
+BATCH_SIZE = 32
+CHANNELS = 3
+data_dir = '/Users/ponnumonu/Desktop/AUV/myenv/RoadSaW-150_s/test'
+
+#%%
+
+# Load dataset and split (Train 80%, Validation 10%, Test 10%)
+test_ds = image_dataset_from_directory(
+    data_dir,
+    seed=123,
+    shuffle=False,
+    image_size=(224, 224),
+    batch_size=32
+)
+
+
+# %% CLASS NAMES
+
+
+class_names = test_ds.class_names
+print(class_names)
+
+#%%
+class_counts = collections.Counter()
+
+
+# Iterate through the dataset
+for _, labels in test_ds:
+    class_counts.update(labels.numpy())  # Convert Tensor to numpy array and count
+
+# Print the counts for each class
+for class_label, count in class_counts.items():
+    print(f"Class {class_label}: {count} images")
+
+#%% Normalization layer
+
+normalization_layer = tf.keras.layers.Rescaling(1./255)
+
+#%%Normalize test data
+
+test_ds = test_ds.map(lambda x, y: (normalization_layer(x), y))
+image_batch, labels_batch = next(iter(test_ds))
+first_image = image_batch[0]
+# Notice the pixel values are now in `[0,1]`.
+print(np.min(first_image), np.max(first_image))
+
+
+#%% Evaluation 1
+
+test_loss, test_acc = trained_model.evaluate(test_ds)
+print(f"Test Accuracy: {test_acc:.4f}")
+
+
+#%% Evaluation 2
+
+# get the test labels array
+test_ds_labels = np.concatenate([labels for _, labels in test_ds], axis=0)
+
+# How many images and labels do we have?
+#len(test_ds_labels)
+
+#%% Perform the prediction using model.predict
+y_pred_probs = trained_model.predict(test_ds)  # Shape: (num_samples, num_classes)
+
+# Convert probabilities to class labels
+y_pred = np.argmax(y_pred_probs, axis=1)
+
+#%%
+# Calculate accuracy manually
+accuracy = accuracy_score(test_ds_labels, y_pred)
+print(f"Test Accuracy (manual calculation): {accuracy:.4f}")
+# %%
+# Compute confusion matrix
+cm = confusion_matrix(test_ds_labels, y_pred)
+
+# Plot confusion matrix
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=class_names)
+disp.plot(cmap=plt.cm.Blues, xticks_rotation=90)
+
+plt.title("Confusion Matrix")
+plt.show()
