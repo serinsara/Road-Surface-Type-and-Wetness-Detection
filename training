@@ -1,0 +1,283 @@
+#%% 1. IMPORT DEPENDENCIES
+import tensorflow as tf
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+import pickle
+import seaborn as sns
+from sklearn.metrics import confusion_matrix
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+from tensorflow.keras.preprocessing import image_dataset_from_directory
+from tensorflow.keras.applications import MobileNetV3Small
+from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout, BatchNormalization
+from tensorflow.keras.models import Model
+
+#%% 2: DEFINE FEW CONSTANTS
+IMG_SIZE = 224
+BATCH_SIZE = 32
+CHANNELS = 3
+EPOCHS = 30
+data_dir = '/Users/ponnumonu/Desktop/AUV/myenv/RoadSaW-150_s_modified_train and validation/train and validation'
+
+#%% 3. LOAD TRAINING AND VALIDATION DATASET WITH A SPLIT OF 80 - 20
+# Load dataset and split (Train 80%, Validation 10%, Test 10%)
+train_ds = image_dataset_from_directory(
+    data_dir,
+    validation_split=0.2,
+    subset="training",
+    seed=123,
+    image_size=(224, 224),
+    batch_size=32
+)
+
+val_ds = image_dataset_from_directory(
+    data_dir,
+    validation_split=0.2,
+    subset="validation",
+    seed=123,
+    image_size=(224, 224),
+    batch_size=32
+)
+
+# %% 4. CLASS NAMES
+class_names = train_ds.class_names
+#class_names = train_ds.class_names
+print(class_names)
+
+#%% 6. VISUALIZE THE DATA
+plt.figure(figsize=(10, 10))
+for images, labels in val_ds.take(1):
+  for i in range(9):
+    ax = plt.subplot(3, 3, i + 1)
+    plt.imshow(images[i].numpy().astype("uint8"))
+    plt.title(class_names[labels[i]])
+    plt.axis("off")
+
+#%% 7. NORMALIZE THE DATA
+normalization_layer = tf.keras.layers.Rescaling(1./255)
+#%% 7a. Normalize training data
+train_ds = train_ds.map(lambda x, y: (normalization_layer(x), y))
+image_batch, labels_batch = next(iter(train_ds))
+first_image = image_batch[0]
+# Notice the pixel values are now in `[0,1]`.
+print(np.min(first_image), np.max(first_image))
+
+#%% 7b. Normalize validation data
+val_ds = val_ds.map(lambda x, y: (normalization_layer(x), y))
+image_batch, labels_batch = next(iter(val_ds))
+first_image = image_batch[0]
+# Notice the pixel values are now in `[0,1]`.
+print(np.min(first_image), np.max(first_image))
+
+#%% 8. DEFINE THE CNN NETWORK
+# ========== 8a. Load Pretrained MobileNetV3 ==========
+base_model = MobileNetV3Small(
+    input_shape=(224, 224, 3),
+    include_top=False,  # Remove the original classification layer
+    weights="imagenet",
+    include_preprocessing=False
+)
+base_model.trainable = False  # Freeze base model
+# %%
+# ========== 8b. Add Custom Classification Head ==========
+x = base_model.output
+x = GlobalAveragePooling2D()(x)
+x = Dense(512, activation='relu')(x)
+x = BatchNormalization()(x)
+x = Dropout(0.3)(x)
+
+x = Dense(256, activation='relu')(x)
+x = BatchNormalization()(x)
+x = Dropout(0.3)(x)
+
+output_layer = Dense(len(class_names), activation='softmax')(x)  # Change based on classes
+model = Model(inputs=base_model.input, outputs=output_layer)
+
+# %% 9. Model summary
+model.summary()
+
+#%% 10. Compile model
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
+    loss="sparse_categorical_crossentropy",
+    metrics=["accuracy"]
+)
+
+# %% 11. Train the model
+
+history = model.fit(
+    train_ds,
+    validation_data=val_ds,
+    epochs=EPOCHS
+)
+
+# %% 12. Evaulation
+# 12a. Model evaluation accuracy
+fig1 = plt.gcf()
+plt.plot(history.history['accuracy'])
+plt.plot(history.history['val_accuracy'])
+plt.axis(ymin=0.0,ymax=1)
+plt.grid()
+plt.title('Model Accuracy')
+plt.ylabel('Accuracy')
+plt.xlabel('Epochs')
+plt.legend(['train', 'validation'])
+plt.show()
+
+#%% 12b. Model evaluation, Loss
+ 
+plt.plot(history.history['loss'])
+plt.plot(history.history['val_loss'])
+plt.grid()
+plt.title('Model Loss')
+plt.ylabel('Loss')
+plt.xlabel('Epochs')
+plt.legend(['train', 'validation'])
+plt.show()
+
+# %% Ensure the 'models' folder exists before saving
+os.makedirs('models', exist_ok=True)
+
+# %%saving the model
+
+model.save('models/best_model.keras')
+
+# %% Save the training history as well (everything below from cg)
+
+with open('models/history_mobilenetv3small_2.pkl', 'wb') as f:
+    pickle.dump(history.history, f)
+
+plt.tight_layout(); plt.show()
+
+from tensorflow.keras import Model
+from sklearn.manifold import TSNE
+from sklearn.decomposition import PCA
+import matplotlib.pyplot as plt
+
+# --- get the penultimate layer output (the layer just before the final Dense softmax) ---
+# model.layers[-1] is the softmax Dense; so use model.layers[-2] output
+feat_model = Model(inputs=model.input, outputs=model.layers[-2].output)
+
+# --- collect features + labels from validation (or combined train+val) ---
+# choose which dataset to visualize:
+viz_ds = val_ds   # or: train_ds.concatenate(val_ds)
+
+features = []
+labels = []
+for batch_imgs, batch_labels in viz_ds:
+    feats = feat_model.predict(batch_imgs, verbose=0)  # [B, D]
+    features.append(feats)
+    labels.append(batch_labels.numpy())
+
+features = np.concatenate(features, axis=0)
+labels = np.concatenate(labels, axis=0)
+
+# --- optional: speed up t-SNE with PCA to 50 dims ---
+if features.shape[1] > 50:
+    features_pca = PCA(n_components=50, random_state=42).fit_transform(features)
+else:
+    features_pca = features
+
+# --- t SNE ---
+tsne = TSNE(n_components=2, perplexity=30, learning_rate='auto', init='random', random_state=42)
+xy = tsne.fit_transform(features_pca)   # shape [N,2]
+
+# --- plot ---
+plt.figure(figsize=(8,7))
+for k, name in enumerate(class_names):
+    idx = labels == k
+    plt.scatter(xy[idx,0], xy[idx,1], s=10, alpha=0.75, label=name)
+plt.legend(markerscale=2, bbox_to_anchor=(1.02, 1), loc='upper left')
+plt.title("t SNE of penultimate layer embeddings")
+plt.xlabel("dim 1"); plt.ylabel("dim 2")
+plt.tight_layout(); plt.show()
+
+import numpy as np, tensorflow as tf, matplotlib.pyplot as plt
+import cv2
+
+# --- pick an image from your val_ds (already normalized to [0,1]) ---
+sample_images, sample_labels = next(iter(val_ds.unbatch().batch(1)))
+img = sample_images[0].numpy()        # [H,W,3], float32 in [0,1]
+true_idx = int(sample_labels[0].numpy())
+
+# --- find last conv layer automatically ---
+last_conv = None
+for layer in reversed(model.layers):
+    try:
+        shape = layer.output.shape
+        if len(shape) == 4:  # feature map
+            last_conv = layer.name
+            break
+    except:
+        pass
+assert last_conv is not None, "Couldn't find a 4D conv layer."
+
+# --- Grad-CAM function ---
+def gradcam(model, img_tensor, last_conv_name, class_index=None):
+    grad_model = tf.keras.models.Model(
+        [model.inputs],
+        [model.get_layer(last_conv_name).output, model.output]
+    )
+    with tf.GradientTape() as tape:
+        conv_out, preds = grad_model(img_tensor)
+        if class_index is None:
+            class_index = tf.argmax(preds[0])
+        class_channel = preds[:, class_index]
+
+    grads = tape.gradient(class_channel, conv_out)               # d(score)/d(featuremap)
+    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))         # [C]
+    conv_out = conv_out[0]                                       # [H',W',C]
+    heatmap = tf.reduce_sum(conv_out * pooled_grads, axis=-1)    # [H',W']
+    heatmap = tf.maximum(heatmap, 0) / (tf.reduce_max(heatmap) + 1e-8)
+    return heatmap.numpy()
+
+# --- run Grad-CAM ---
+img_tensor = tf.convert_to_tensor(img[None, ...])  # [1,H,W,3]
+preds = model.predict(img_tensor, verbose=0)[0]
+pred_idx = int(np.argmax(preds))
+
+heatmap = gradcam(model, img_tensor, last_conv, class_index=pred_idx)
+
+# --- overlay on original image ---
+h, w = img.shape[:2]
+heatmap_resized = cv2.resize(heatmap, (w, h))
+heatmap_uint8 = np.uint8(255 * heatmap_resized)
+heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+overlay = cv2.addWeighted(np.uint8(img*255), 1.0, heatmap_color, 0.35, 0)
+
+plt.figure(figsize=(9,3))
+plt.subplot(1,3,1); plt.imshow(img); plt.title(f"Input\ntrue={class_names[true_idx]}"); plt.axis('off')
+plt.subplot(1,3,2); plt.imshow(heatmap_resized, cmap='jet'); plt.title("Grad CAM heatmap"); plt.axis('off')
+plt.subplot(1,3,3); plt.imshow(overlay[:,:,::-1]); plt.title(f"Overlay\npred={class_names[pred_idx]}"); plt.axis('off')
+plt.tight_layout(); plt.show()
+
+# %% Confusion Matrix for Train + Validation (using existing datasets)
+
+# 1. Combine train and validation datasets into one dataset object
+combined_ds = train_ds.concatenate(val_ds)
+
+# 2. Ensure no extra shuffling so labels and predictions align consistently
+combined_ds = combined_ds.prefetch(tf.data.AUTOTUNE)
+
+# 3. Get true and predicted labels
+true_labels = []
+pred_labels = []
+
+for images, labels in combined_ds:
+    preds = model.predict(images, verbose=0)
+    pred_labels.extend(np.argmax(preds, axis=1))
+    true_labels.extend(labels.numpy())
+
+# 4. Create the confusion matrix
+cm = confusion_matrix(true_labels, pred_labels)
+
+# 5. Plot the confusion matrix
+plt.figure(figsize=(10, 8))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+            xticklabels=class_names,
+            yticklabels=class_names)
+plt.xlabel('Predicted Label')
+plt.ylabel('True Label')
+plt.title('Confusion Matrix — Train + Validation')
+plt.show()
+
